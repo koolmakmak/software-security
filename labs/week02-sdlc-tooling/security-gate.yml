@@ -1,0 +1,84 @@
+# Week 2 — security CI gate (adapted from labs/week15-devsecops-pipeline/security-ci.yml)
+# Runs SAST + SCA + secret scanning on every push/PR and FAILS on HIGH/CRITICAL.
+name: wk02-security-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep (report)
+        run: semgrep scan --config p/default --config p/owasp-top-ten --sarif --output semgrep.sarif || true
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+      - name: Gate — fail on Semgrep findings
+        run: semgrep scan --config p/default --config p/owasp-top-ten --error
+
+  trivy:
+    name: SCA (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy fs (report)
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-fs.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Gate — fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+
+  gitleaks:
+    name: Secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks (report)
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect -s /repo --report-format sarif --report-path /repo/gitleaks.sarif --exit-code 0 -v || true
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+      - name: Gate — fail if any secret is found
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect -s /repo --exit-code 1 -v
